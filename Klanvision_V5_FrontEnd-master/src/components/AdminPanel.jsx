@@ -60,6 +60,146 @@ const formatTimestamp = (ts) => {
   }
 };
 
+const normalizePermission = (p) => {
+  if (p === 'MANAGE_USERS') return 'Users';
+  if (p === 'MANAGE_PROJECTS' || p === 'MANAGE_JOBS') return 'Projects';
+  if (p === 'MANAGE_BLOGS') return 'Blogs';
+  if (p === 'MANAGE_SEO') return 'Settings';
+  if (p === 'MANAGE_ACTIVITIES') return 'Activity Log';
+  return p;
+};
+
+const hasTabPermission = (user, tabId) => {
+  if (!user) return false;
+  const role = (user.role || '').toUpperCase();
+  if (role === 'SUPER_ADMIN' || role === 'SUPER ADMIN' || role === 'ADMIN' || role === 'ADMINISTRATOR' || role === 'SUPERADMIN') {
+    return true;
+  }
+  
+  const permMap = {
+    dashboard:  null,             // always visible
+    users:      'Users',
+    projects:   'Projects',
+    blogs:      'Blogs',
+    settings:   'Settings',
+    activity:   'Activity Log',
+  };
+  const required = permMap[tabId];
+  if (required === null) return true;       // no permission required
+  if (required === undefined) return false; // unknown tab
+  
+  const perms = (user.permissions || []).map(normalizePermission);
+  if (perms.includes('ALL_ACCESS') || perms.includes('SUPER_ADMIN')) {
+    return true;
+  }
+  
+  // Explicitly granted tab access
+  if (perms.includes(required)) {
+    return true;
+  }
+  
+  // Base role read access
+  if (role === 'VIEWER') {
+    // Viewers get access to see all standard panels by default
+    return true;
+  }
+  if (role === 'DEVELOPER') {
+    if (tabId === 'projects' || tabId === 'settings' || tabId === 'activity') return true;
+  }
+  if (role === 'EDITOR') {
+    if (tabId === 'blogs') return true;
+  }
+  
+  return false;
+};
+
+const hasWritePermission = (user, tabId) => {
+  if (!user) return false;
+  const role = (user.role || '').toUpperCase();
+  
+  // Super Admin and Admin have full write access everywhere
+  if (role === 'SUPER_ADMIN' || role === 'SUPER ADMIN' || role === 'ADMIN' || role === 'ADMINISTRATOR' || role === 'SUPERADMIN') {
+    return true;
+  }
+  
+  // Viewer has no write access (read-only) regardless of explicit permissions
+  if (role === 'VIEWER') {
+    return false;
+  }
+  
+  const perms = (user.permissions || []).map(normalizePermission);
+  if (perms.includes('ALL_ACCESS') || perms.includes('SUPER_ADMIN')) {
+    return true;
+  }
+  
+  const permMap = {
+    users:      'Users',
+    projects:   'Projects',
+    blogs:      'Blogs',
+    settings:   'Settings',
+    activity:   'Activity Log',
+  };
+  const required = permMap[tabId];
+  
+  // If explicitly granted permission by Superadmin, allow write (what ever superadmin provided)
+  if (required && perms.includes(required)) {
+    return true;
+  }
+  
+  // Base role write access
+  if (role === 'DEVELOPER') {
+    return tabId === 'projects' || tabId === 'settings';
+  }
+  
+  if (role === 'EDITOR') {
+    return tabId === 'blogs';
+  }
+  
+  return false;
+};
+
+function UnauthorizedView() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '80px 40px',
+        textAlign: 'center',
+        background: 'rgba(30, 41, 59, 0.3)',
+        backdropFilter: 'blur(20px)',
+        borderRadius: 32,
+        border: '1px solid rgba(239, 68, 68, 0.2)',
+        maxWidth: 600,
+        margin: '40px auto'
+      }}
+    >
+      <div style={{
+        width: 80,
+        height: 80,
+        borderRadius: 24,
+        background: 'rgba(239, 68, 68, 0.1)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: '#F87171',
+        marginBottom: 24,
+        boxShadow: '0 10px 30px rgba(239, 68, 68, 0.2)'
+      }}>
+        <Lock size={40} />
+      </div>
+      <h3 style={{ fontSize: 24, fontWeight: 900, color: 'white', marginBottom: 12 }}>Access Restricted</h3>
+      <p style={{ color: '#94A3B8', fontSize: 15, lineHeight: 1.6, maxWidth: 400, marginBottom: 32 }}>
+        Your account profile does not possess the required module privileges to access this section. Please contact your system administrator to adjust your credentials.
+      </p>
+    </motion.div>
+  );
+}
+
 // --- Types ---
 
 
@@ -346,6 +486,10 @@ export default function AdminPanel() {
           setCurrentUser(user);
           setLoginError('');
           addActivity(user.name, 'System Login', 'security', 'success', `Successful login from ${user.email}`);
+          
+          if (result.token) {
+            user.token = result.token;
+          }
           localStorage.setItem('klanvision_admin_session', JSON.stringify({ user, loginTime: Date.now() }));
         }
       } else {
@@ -582,7 +726,7 @@ export default function AdminPanel() {
       if (verifyingUser) {
         try {
           // Verify code with backend
-          await api.verify2FA(verifyingUser.email, code);
+          const authenticatedUser = await api.verify2FA(verifyingUser.email, code);
 
           // Set user 2FA configuration to true in backend database
           await api.updateUser(verifyingUser.id, {
@@ -594,12 +738,13 @@ export default function AdminPanel() {
           setUsers(prev => prev.map(u => u.id === verifyingUser.id ? { ...u, is2FAConfigured: true, failed2FAAttempts: 0 } : u));
           setIsSettingUp2FA(false);
           setIsAuthenticated(true);
-          setCurrentUser({ ...verifyingUser, is2FAConfigured: true });
+          const finalUser = { ...verifyingUser, is2FAConfigured: true, token: authenticatedUser.token };
+          setCurrentUser(finalUser);
           setVerifyingUser(null);
           setAuthCode(['', '', '', '', '', '']);
           setLoginError('');
           addActivity(verifyingUser.name, '2FA Configured', 'security', 'success', `Initial 2FA setup completed for ${verifyingUser.email}. Now verifying.`);
-          localStorage.setItem('klanvision_admin_session', JSON.stringify({ user: { ...verifyingUser, is2FAConfigured: true }, loginTime: Date.now() }));
+          localStorage.setItem('klanvision_admin_session', JSON.stringify({ user: finalUser, loginTime: Date.now() }));
         } catch (err) {
           setLoginError('Verification failed. Use the code shown in your app.');
         }
@@ -880,7 +1025,7 @@ export default function AdminPanel() {
         </div>
 
         <nav style={{ padding: '20px 16px', flex: 1 }}>
-          {navItems.filter(item => currentUser?.permissions.includes(item.label)).map((item) => (
+          {navItems.filter(item => hasTabPermission(currentUser, item.id)).map((item) => (
             <button key={item.id} onClick={() => setActiveTab(item.id)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 16, padding: '14px 18px', borderRadius: 16, border: 'none', background: activeTab === item.id ? item.gradient : 'transparent', color: activeTab === item.id ? 'white' : '#94A3B8', cursor: 'pointer', transition: 'all 0.3s', marginBottom: 8, fontWeight: 700, fontSize: 14 }}>
               <item.icon size={20} />
               {isSidebarOpen && <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>}
@@ -952,7 +1097,7 @@ export default function AdminPanel() {
                     { icon: LayoutPanelLeft, label: 'View Projects', tab: 'projects' },
                     { icon: FileText, label: 'Edit Blogs', tab: 'blogs' },
                     { icon: Activity, label: 'System Audit', tab: 'activity' }
-                  ].filter(item => item.label.toLowerCase().includes(commandQuery.toLowerCase())).map((item) => (
+                  ].filter(item => hasTabPermission(currentUser, item.tab) && item.label.toLowerCase().includes(commandQuery.toLowerCase())).map((item) => (
                     <button
                       key={item.tab}
                       onClick={() => { setActiveTab(item.tab); setIsCommandPaletteOpen(false); setCommandQuery(''); }}
@@ -985,67 +1130,83 @@ export default function AdminPanel() {
           <AnimatePresence mode="wait">
             {activeTab === 'dashboard' && <DashboardView projects={projects} users={users} blogs={blogs} activities={activities} setActiveTab={setActiveTab} />}
             {activeTab === 'users' && (
-              <UsersView
-                users={users}
-                onAddClick={() => { setEditingUser(null); setIsUserModalOpen(true); }}
-                onEditClick={(user) => { setEditingUser(user); setIsUserModalOpen(true); }}
-                onDeleteClick={(id) => {
-                  api.deleteUser(id).then(() => {
-                    const user = users.find(u => u.id === id);
-                    setUsers(prev => prev.filter(u => u.id !== id));
-                    if (user) addActivity(currentUser?.name || 'Admin', 'User Removed', 'security', 'warning', `Deleted account for ${user.name}`);
-                  }).catch(err => console.error("Error deleting user:", err));
-                }}
-                onToggleAccess={handleToggleUserAccess}
-                searchQuery={globalSearchQuery}
-                roleFilter={userRoleFilter}
-              />
+              hasTabPermission(currentUser, 'users') ? (
+                <UsersView
+                  users={users}
+                  onAddClick={() => { setEditingUser(null); setIsUserModalOpen(true); }}
+                  onEditClick={(user) => { setEditingUser(user); setIsUserModalOpen(true); }}
+                  onDeleteClick={(id) => {
+                    api.deleteUser(id).then(() => {
+                      const user = users.find(u => u.id === id);
+                      setUsers(prev => prev.filter(u => u.id !== id));
+                      if (user) addActivity(currentUser?.name || 'Admin', 'User Removed', 'security', 'warning', `Deleted account for ${user.name}`);
+                    }).catch(err => console.error("Error deleting user:", err));
+                  }}
+                  onToggleAccess={handleToggleUserAccess}
+                  searchQuery={globalSearchQuery}
+                  roleFilter={userRoleFilter}
+                  canEdit={hasWritePermission(currentUser, 'users')}
+                />
+              ) : <UnauthorizedView />
             )}
             {activeTab === 'projects' && (
-              <ProjectsView
-                projects={projects}
-                onAddClick={() => { setEditingProject(null); setIsProjectModalOpen(true); }}
-                onEditClick={(project) => { setEditingProject(project); setIsProjectModalOpen(true); }}
-                onDeleteClick={(id) => {
-                  api.deleteProject(id).then(() => {
-                    const project = projects.find(p => p.id === id);
-                    setProjects(prev => prev.filter(p => p.id !== id));
-                    if (project) addActivity(currentUser?.name || 'Admin', 'Project Terminated', 'project', 'warning', `Removed project "${project.title}"`);
-                  }).catch(err => console.error("Error deleting project:", err));
-                }}
-                searchQuery={globalSearchQuery}
-                statusFilter={projectStatusFilter}
-              />
+              hasTabPermission(currentUser, 'projects') ? (
+                <ProjectsView
+                  projects={projects}
+                  onAddClick={() => { setEditingProject(null); setIsProjectModalOpen(true); }}
+                  onEditClick={(project) => { setEditingProject(project); setIsProjectModalOpen(true); }}
+                  onDeleteClick={(id) => {
+                    api.deleteProject(id).then(() => {
+                      const project = projects.find(p => p.id === id);
+                      setProjects(prev => prev.filter(p => p.id !== id));
+                      if (project) addActivity(currentUser?.name || 'Admin', 'Project Terminated', 'project', 'warning', `Removed project "${project.title}"`);
+                    }).catch(err => console.error("Error deleting project:", err));
+                  }}
+                  searchQuery={globalSearchQuery}
+                  statusFilter={projectStatusFilter}
+                  canEdit={hasWritePermission(currentUser, 'projects')}
+                />
+              ) : <UnauthorizedView />
             )}
             {activeTab === 'blogs' && (
-              <BlogsView
-                blogs={blogs}
-                onAddClick={() => { setEditingBlog(null); setIsBlogModalOpen(true); }}
-                onEditClick={(blog) => { setEditingBlog(blog); setIsBlogModalOpen(true); }}
-                onDeleteClick={(id) => {
-                  api.deleteBlog(id).then(() => {
-                    const blog = blogs.find(b => b.id === id);
-                    setBlogs(prev => prev.filter(b => b.id !== id));
-                    if (blog) addActivity(currentUser?.name || 'Admin', 'Blog Deleted', 'content', 'warning', `Removed article "${blog.title}"`);
-                  }).catch(err => console.error("Error deleting blog:", err));
-                }}
-                searchQuery={globalSearchQuery}
-                categoryFilter={blogCategoryFilter}
-              />
+              hasTabPermission(currentUser, 'blogs') ? (
+                <BlogsView
+                  blogs={blogs}
+                  onAddClick={() => { setEditingBlog(null); setIsBlogModalOpen(true); }}
+                  onEditClick={(blog) => { setEditingBlog(blog); setIsBlogModalOpen(true); }}
+                  onDeleteClick={(id) => {
+                    api.deleteBlog(id).then(() => {
+                      const blog = blogs.find(b => b.id === id);
+                      setBlogs(prev => prev.filter(b => b.id !== id));
+                      if (blog) addActivity(currentUser?.name || 'Admin', 'Blog Deleted', 'content', 'warning', `Removed article "${blog.title}"`);
+                    }).catch(err => console.error("Error deleting blog:", err));
+                  }}
+                  searchQuery={globalSearchQuery}
+                  categoryFilter={blogCategoryFilter}
+                  canEdit={hasWritePermission(currentUser, 'blogs')}
+                />
+              ) : <UnauthorizedView />
             )}
             {activeTab === 'settings' && (
-              <SettingsView
-                theme={theme} setTheme={setTheme}
-                accentColor={accentColor} setAccentColor={setAccentColor}
-                glassIntensity={glassIntensity} setGlassIntensity={setGlassIntensity}
-                twoFactor={twoFactor} setTwoFactor={setTwoFactor}
-                maintenanceMode={maintenanceMode} setMaintenanceMode={setMaintenanceMode}
-                platformLogo={platformLogo} setPlatformLogo={setPlatformLogo}
-                companyName={companyName} setCompanyName={setCompanyName}
-                addActivity={addActivity}
-              />
+              hasTabPermission(currentUser, 'settings') ? (
+                <SettingsView
+                  theme={theme} setTheme={setTheme}
+                  accentColor={accentColor} setAccentColor={setAccentColor}
+                  glassIntensity={glassIntensity} setGlassIntensity={setGlassIntensity}
+                  twoFactor={twoFactor} setTwoFactor={setTwoFactor}
+                  maintenanceMode={maintenanceMode} setMaintenanceMode={setMaintenanceMode}
+                  platformLogo={platformLogo} setPlatformLogo={setPlatformLogo}
+                  companyName={companyName} setCompanyName={setCompanyName}
+                  addActivity={addActivity}
+                  canEdit={hasWritePermission(currentUser, 'settings')}
+                />
+              ) : <UnauthorizedView />
             )}
-            {activeTab === 'activity' && <ActivityView activities={activities} />}
+            {activeTab === 'activity' && (
+              hasTabPermission(currentUser, 'activity') ? (
+                <ActivityView activities={activities} />
+              ) : <UnauthorizedView />
+            )}
           </AnimatePresence>
         </div>
       </main>
@@ -1174,7 +1335,7 @@ function UserForm({ initialData, onSave }) {
     email: initialData?.email || '',
     password: initialData?.password || '',
     role: initialData?.role || 'Viewer',
-    permissions: initialData?.permissions || [],
+    permissions: (initialData?.permissions || []).map(normalizePermission),
     isAuthorized: initialData?.isAuthorized ?? true,
     is2FAEnabled: true
   });
@@ -1317,7 +1478,7 @@ function UserForm({ initialData, onSave }) {
   );
 }
 
-function UsersView({ users, onAddClick, onEditClick, onDeleteClick, onToggleAccess, searchQuery, roleFilter }) {
+function UsersView({ users, onAddClick, onEditClick, onDeleteClick, onToggleAccess, searchQuery, roleFilter, canEdit }) {
   const filteredUsers = users.filter((u) => {
     const matchesSearch = u.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       u.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -1333,9 +1494,11 @@ function UsersView({ users, onAddClick, onEditClick, onDeleteClick, onToggleAcce
           <h2 style={{ fontSize: 36, fontWeight: 900, letterSpacing: '-1.5px' }}>Team <span className="gradient-text">Directory</span></h2>
           <p style={{ color: '#94A3B8', marginTop: 10, fontSize: 16 }}>Manage authentication and security modules.</p>
         </div>
-        <button onClick={onAddClick} className="btn-primary" style={{ padding: '16px 32px', display: 'flex', alignItems: 'center', gap: 12, borderRadius: 16 }}>
-          <UserPlus size={22} /> Add Member
-        </button>
+        {canEdit && (
+          <button onClick={onAddClick} className="btn-primary" style={{ padding: '16px 32px', display: 'flex', alignItems: 'center', gap: 12, borderRadius: 16 }}>
+            <UserPlus size={22} /> Add Member
+          </button>
+        )}
       </div>
 
       {filteredUsers.length === 0 ? (
@@ -1366,10 +1529,10 @@ function UsersView({ users, onAddClick, onEditClick, onDeleteClick, onToggleAcce
                       <div style={{ color: '#F87171', fontSize: 10, fontWeight: 900, display: 'flex', alignItems: 'center', gap: 4 }}><X size={12} /> LOCKED</div>
                     )}
                     <div
-                      onClick={() => onToggleAccess && onToggleAccess(user)}
+                      onClick={() => canEdit && onToggleAccess && onToggleAccess(user)}
                       style={{
                         width: 36, height: 18, borderRadius: 20, background: user.isAuthorized ? '#6366F1' : 'rgba(255,255,255,0.1)',
-                        position: 'relative', cursor: 'pointer', transition: '0.3s', display: 'inline-block'
+                        position: 'relative', cursor: canEdit ? 'pointer' : 'not-allowed', transition: '0.3s', display: 'inline-block', opacity: canEdit ? 1 : 0.6
                       }}
                     >
                       <motion.div animate={{ x: user.isAuthorized ? 20 : 2 }} style={{ width: 14, height: 14, borderRadius: '50%', background: 'white', position: 'absolute', top: 2 }} />
@@ -1385,10 +1548,12 @@ function UsersView({ users, onAddClick, onEditClick, onDeleteClick, onToggleAcce
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: 12, marginTop: 'auto' }}>
-                <button onClick={() => onEditClick(user)} style={{ flex: 1, padding: '14px', borderRadius: 16, background: 'rgba(255,255,255,0.05)', border: 'none', color: 'white', fontSize: 13, fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}><Edit2 size={16} /> Modify</button>
-                <button onClick={() => onDeleteClick(user.id)} style={{ width: 52, height: 52, borderRadius: 16, background: 'rgba(239, 68, 68, 0.1)', border: 'none', color: '#F87171', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Trash2 size={20} /></button>
-              </div>
+              {canEdit && (
+                <div style={{ display: 'flex', gap: 12, marginTop: 'auto' }}>
+                  <button onClick={() => onEditClick(user)} style={{ flex: 1, padding: '14px', borderRadius: 16, background: 'rgba(255,255,255,0.05)', border: 'none', color: 'white', fontSize: 13, fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}><Edit2 size={16} /> Modify</button>
+                  <button onClick={() => onDeleteClick(user.id)} style={{ width: 52, height: 52, borderRadius: 16, background: 'rgba(239, 68, 68, 0.1)', border: 'none', color: '#F87171', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Trash2 size={20} /></button>
+                </div>
+              )}
             </motion.div>
           ))}
         </div>
@@ -1512,7 +1677,7 @@ function ProjectForm({ initialData, teamMembers, onSave }) {
 }
 
 
-function ProjectsView({ projects, onAddClick, onEditClick, onDeleteClick, searchQuery, statusFilter }) {
+function ProjectsView({ projects, onAddClick, onEditClick, onDeleteClick, searchQuery, statusFilter, canEdit }) {
   const filteredProjects = projects.filter((p) => {
     const matchesSearch = p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       p.client.toLowerCase().includes(searchQuery.toLowerCase());
@@ -1536,9 +1701,11 @@ function ProjectsView({ projects, onAddClick, onEditClick, onDeleteClick, search
           <h2 style={{ fontSize: 36, fontWeight: 900, letterSpacing: '-1.5px' }}>Project <span className="gradient-text">Control</span></h2>
           <p style={{ color: '#94A3B8', marginTop: 10, fontSize: 18 }}>Manage high-impact initiatives and milestones.</p>
         </div>
-        <button onClick={onAddClick} className="btn-primary" style={{ padding: '16px 32px', display: 'flex', alignItems: 'center', gap: 12, borderRadius: 16 }}>
-          <Plus size={22} /> Initiate Project
-        </button>
+        {canEdit && (
+          <button onClick={onAddClick} className="btn-primary" style={{ padding: '16px 32px', display: 'flex', alignItems: 'center', gap: 12, borderRadius: 16 }}>
+            <Plus size={22} /> Initiate Project
+          </button>
+        )}
       </div>
 
       {filteredProjects.length === 0 ? (
@@ -1590,12 +1757,14 @@ function ProjectsView({ projects, onAddClick, onEditClick, onDeleteClick, search
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: 12, marginTop: 'auto' }}>
-                <button onClick={() => onEditClick(p)} style={{ flex: 1, padding: '14px', borderRadius: 16, background: 'rgba(255,255,255,0.05)', border: 'none', color: 'white', fontSize: 14, fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}><Edit2 size={16} /> Manage</button>
-                <button onClick={() => onDeleteClick(p.id)} style={{ width: 48, height: 48, borderRadius: 16, background: 'rgba(239, 68, 68, 0.1)', border: 'none', color: '#F87171', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Trash2 size={18} />
-                </button>
-              </div>
+              {canEdit && (
+                <div style={{ display: 'flex', gap: 12, marginTop: 'auto' }}>
+                  <button onClick={() => onEditClick(p)} style={{ flex: 1, padding: '14px', borderRadius: 16, background: 'rgba(255,255,255,0.05)', border: 'none', color: 'white', fontSize: 14, fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}><Edit2 size={16} /> Manage</button>
+                  <button onClick={() => onDeleteClick(p.id)} style={{ width: 48, height: 48, borderRadius: 16, background: 'rgba(239, 68, 68, 0.1)', border: 'none', color: '#F87171', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Trash2 size={18} />
+                  </button>
+                </div>
+              )}
             </motion.div>
           ))}
         </div>
@@ -1604,7 +1773,7 @@ function ProjectsView({ projects, onAddClick, onEditClick, onDeleteClick, search
   );
 }
 
-function BlogsView({ blogs, onAddClick, onEditClick, onDeleteClick, searchQuery, categoryFilter }) {
+function BlogsView({ blogs, onAddClick, onEditClick, onDeleteClick, searchQuery, categoryFilter, canEdit }) {
   const filteredBlogs = blogs.filter((b) => {
     const matchesSearch = b.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       b.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -1620,9 +1789,11 @@ function BlogsView({ blogs, onAddClick, onEditClick, onDeleteClick, searchQuery,
           <h2 style={{ fontSize: 36, fontWeight: 900, letterSpacing: '-1.5px' }}>Insight <span className="gradient-text">Engine</span></h2>
           <p style={{ color: '#94A3B8', marginTop: 10, fontSize: 18 }}>Publish thought leadership and company milestones.</p>
         </div>
-        <button onClick={onAddClick} className="btn-primary" style={{ padding: '16px 32px', display: 'flex', alignItems: 'center', gap: 12, borderRadius: 16 }}>
-          <Plus size={22} /> Draft Article
-        </button>
+        {canEdit && (
+          <button onClick={onAddClick} className="btn-primary" style={{ padding: '16px 32px', display: 'flex', alignItems: 'center', gap: 12, borderRadius: 16 }}>
+            <Plus size={22} /> Draft Article
+          </button>
+        )}
       </div>
 
       {filteredBlogs.length === 0 ? (
@@ -1676,14 +1847,16 @@ function BlogsView({ blogs, onAddClick, onEditClick, onDeleteClick, searchQuery,
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
-                  <button onClick={() => onEditClick(blog)} style={{ flex: 1, padding: '12px', borderRadius: 14, background: 'rgba(255,255,255,0.05)', border: 'none', color: 'white', fontSize: 13, fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                    <Edit2 size={16} /> Edit
-                  </button>
-                  <button onClick={() => onDeleteClick(blog.id)} style={{ width: 44, height: 44, borderRadius: 14, background: 'rgba(239, 68, 68, 0.1)', border: 'none', color: '#F87171', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <Trash2 size={18} />
-                  </button>
-                </div>
+                {canEdit && (
+                  <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
+                    <button onClick={() => onEditClick(blog)} style={{ flex: 1, padding: '12px', borderRadius: 14, background: 'rgba(255,255,255,0.05)', border: 'none', color: 'white', fontSize: 13, fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                      <Edit2 size={16} /> Edit
+                    </button>
+                    <button onClick={() => onDeleteClick(blog.id)} style={{ width: 44, height: 44, borderRadius: 14, background: 'rgba(239, 68, 68, 0.1)', border: 'none', color: '#F87171', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                )}
               </div>
             </motion.div>
           ))}
@@ -1883,7 +2056,8 @@ function SettingsView({
   maintenanceMode, setMaintenanceMode,
   platformLogo, setPlatformLogo,
   companyName, setCompanyName,
-  addActivity
+  addActivity,
+  canEdit
 }) {
   const [activeSection, setActiveSection] = useState('Interface');
   const [saveStatus, setSaveStatus] = useState(null);
@@ -1901,6 +2075,7 @@ function SettingsView({
   ];
 
   const handleSave = () => {
+    if (!canEdit) return;
     setSaveStatus('Configuring system parameters...');
     setTimeout(() => {
       setSaveStatus('Settings updated successfully.');
@@ -1953,8 +2128,8 @@ function SettingsView({
                 <p style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>Gate client-side access.</p>
               </div>
               <div
-                onClick={() => setMaintenanceMode(!maintenanceMode)}
-                style={{ width: 44, height: 22, borderRadius: 20, background: maintenanceMode ? '#EF4444' : 'rgba(255,255,255,0.1)', position: 'relative', cursor: 'pointer', transition: '0.3s' }}
+                onClick={() => canEdit && setMaintenanceMode(!maintenanceMode)}
+                style={{ width: 44, height: 22, borderRadius: 20, background: maintenanceMode ? '#EF4444' : 'rgba(255,255,255,0.1)', position: 'relative', cursor: canEdit ? 'pointer' : 'not-allowed', transition: '0.3s', opacity: canEdit ? 1 : 0.6 }}
               >
                 <motion.div animate={{ x: maintenanceMode ? 24 : 4 }} style={{ width: 14, height: 14, borderRadius: '50%', background: 'white', position: 'absolute', top: 4 }} />
               </div>
@@ -1963,7 +2138,7 @@ function SettingsView({
         </div>
 
         {/* Settings Content Area */}
-        <div style={{ flex: 1, background: 'rgba(15, 23, 42, 0.4)', borderRadius: 40, border: '1px solid rgba(255,255,255,0.05)', padding: 48, overflowY: 'auto' }}>
+        <div style={{ flex: 1, background: 'rgba(15, 23, 42, 0.4)', borderRadius: 40, border: '1px solid rgba(255,255,255,0.05)', padding: 48, overflowY: 'auto', pointerEvents: canEdit ? 'auto' : 'none', opacity: canEdit ? 1 : 0.8 }}>
           <AnimatePresence mode="wait">
             <motion.div
               key={activeSection}
@@ -1977,7 +2152,7 @@ function SettingsView({
                   <h2 style={{ fontSize: 32, fontWeight: 900, marginBottom: 12 }}>{activeSection} <span className="gradient-text">Configuration</span></h2>
                   <p style={{ color: '#94A3B8', fontSize: 16 }}>{sections.find(s => s.name === activeSection)?.desc}</p>
                 </div>
-                <button onClick={handleSave} className="btn-primary" style={{ padding: '14px 28px', borderRadius: 14, fontSize: 13 }}>SAVE CHANGES</button>
+                {canEdit && <button onClick={handleSave} className="btn-primary" style={{ padding: '14px 28px', borderRadius: 14, fontSize: 13 }}>SAVE CHANGES</button>}
               </div>
 
               {activeSection === 'Interface' && (
